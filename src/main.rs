@@ -1,5 +1,7 @@
 #![feature(plugin)]
 #![plugin(rocket_codegen)]
+#![feature(alloc_system)]
+extern crate alloc_system;
 
 #[macro_use]
 extern crate serde_derive;
