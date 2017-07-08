@@ -20,52 +20,86 @@ struct Task {
     priority: u8,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Placement {
-    id: String,
-    start: u32,
-    end: u32,
+type Timestamp = u32;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Placement<T> {
+    start: Timestamp,
+    end: Timestamp,
+    value: T,
 }
 
+// TODO
+type Constraint = ();
+
+type Utility = NotNaN<f64>;
+
 #[post("/", data = "<tasks>")]
-fn schedule(tasks: JSON<Vec<Task>>) -> Result<JSON<Vec<Placement>>, Box<Error>> {
+fn scheduler(tasks: JSON<Vec<Task>>) -> Result<JSON<Vec<Placement<String>>>, Box<Error>> {
     let tasks = tasks.into_inner();
-    let mut placements = Vec::with_capacity(tasks.capacity());
-    let mut tasks: Vec<_> = tasks.iter().map(|x| Some(x)).collect();
-    let mut now = 0;
-    loop {
-        let task_utils: Result<Vec<_>, _> = tasks
-            .iter()
-            .map(|t| t.map_or(Ok(NotNaN::from(0.0)), |t| utility(t)))
-            .enumerate()
-            .map(|ui| {
-                let (u, i) = ui;
-                i.map(|i| (u, i))
-            })
-            .collect();
-        let task_utils = task_utils?;
-        let t = task_utils
-            .into_iter()
-            .max_by_key(|x| x.1)
-            .and_then(|t| tasks.swap_remove(t.0));
-        if let Some(t) = t {
-            let after = now + t.duration as u32;
-            placements.push(Placement {
-                id: t.id.clone(),
-                start: now,
-                end: after,
-            });
-            now = after + 1;
-        } else {
-            break;
-        };
-    }
+    let placements = schedule(&tasks, &Vec::new(), 0)?;
+    let placements = placements
+        .into_iter()
+        .map(|p| {
+            Placement {
+                start: p.start,
+                end: p.end,
+                value: p.value.id.clone(),
+            }
+        })
+        .collect();
     Ok(JSON(placements))
 }
 
+#[inline]
+fn schedule<'a>(
+    tasks: &'a [Task],
+    constraints: &[Constraint],
+    start: Timestamp,
+) -> Result<Vec<Placement<&'a Task>>, Box<Error>> {
+    let mut placements: Vec<Placement<&Task>> = Vec::with_capacity(tasks.len());
+    let mut tasks: Vec<_> = tasks.iter().map(|x| Some(x)).collect();
+    loop {
+        let mut potentials = Vec::with_capacity(tasks.len());
+        for (i, t) in tasks.iter().enumerate() {
+            if let Some(t) = *t {
+                let now = placements.last().map(|x| x.end);
+                let now = match now {
+                    Some(now) => now + 1,
+                    None => start,
+                };
+                let new = Placement {
+                    start: now,
+                    end: now + t.duration as u32,
+                    value: t,
+                };
+                let mut potential = placements.clone();
+                potential.push(new.clone());
+                potentials.push((evaluate(&potential, &constraints)?, i, new));
+            }
+        }
+        let p = potentials.into_iter().max_by_key(|x| x.0);
+        if let Some((_, i, p)) = p {
+            tasks[i] = None;
+            placements.push(p);
+        } else {
+            break;
+        }
+    }
+    Ok(placements)
+}
 
-fn utility(t: &Task) -> Result<NotNaN<f64>, FloatIsNaN> {
-    NotNaN::new(t.priority as f64 / t.duration as f64)
+fn evaluate(
+    schedule: &[Placement<&Task>],
+    constraints: &[Constraint],
+) -> Result<Utility, FloatIsNaN> {
+    let utils = schedule.iter().map(|p| {
+        let t = p.value;
+        t.priority as f64 / t.duration as f64
+    });
+    let sum = utils.into_iter().sum();
+    let sum = NotNaN::new(sum)?;
+    Ok(sum)
 }
 
 #[get("/healthz")]
@@ -74,6 +108,6 @@ fn health_check() {}
 
 fn main() {
     rocket::ignite()
-        .mount("/", routes![schedule, health_check])
+        .mount("/", routes![scheduler, health_check])
         .launch();
 }
